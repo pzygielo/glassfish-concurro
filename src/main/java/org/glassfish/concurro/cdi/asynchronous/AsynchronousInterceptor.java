@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2025 Contributors to the Eclipse Foundation.
+ * Copyright (c) 2022, 2025, 2026 Contributors to the Eclipse Foundation.
  * Copyright (c) 2024 Payara Foundation and/or its affiliates.
  *
  * This program and the accompanying materials are made available under the
@@ -118,16 +118,16 @@ public class AsynchronousInterceptor {
                     method);
                 resultFuture.cancel(true);
             }
-            return;
+        } else {
+            // The method returned a different future; complete resultFuture when it completes.
+            returnedFuture.whenComplete((value, throwable) -> {
+                if (throwable != null) {
+                    resultFuture.completeExceptionally(throwable);
+                } else {
+                    resultFuture.complete(value);
+                }
+            });
         }
-        // The method returned a different future; complete resultFuture when it completes.
-        returnedFuture.whenComplete((value, throwable) -> {
-            if (throwable != null) {
-                resultFuture.completeExceptionally(throwable);
-            } else {
-                resultFuture.complete(value);
-            }
-        });
     }
 
     private static <T> T lookupMES(Class<T> cls, String executor, String methodName) throws RejectedExecutionException {
