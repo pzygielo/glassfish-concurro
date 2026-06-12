@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, 2025 Contributors to the Eclipse Foundation.
+ * Copyright (c) 2022, 2025, 2026 Contributors to the Eclipse Foundation.
  * Copyright (c) 2024 Payara Foundation and/or its affiliates.
  *
  * This program and the accompanying materials are made available under the
@@ -31,7 +31,6 @@ import java.lang.reflect.Method;
 import java.time.ZoneId;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.function.Consumer;
@@ -76,33 +75,59 @@ public class AsynchronousInterceptor {
         CompletableFuture<Object> resultFuture = new ManagedCompletableFuture<>(mes);
         mes.submit(() -> {
             Asynchronous.Result.setFuture(resultFuture);
-            CompletableFuture<Object> returnedFuture = resultFuture;
             try {
-                // the asynchronous method is responsible for calling Asynchronous.Result.complete()
-                returnedFuture = (CompletableFuture<Object>) context.proceed();
+                // The asynchronous method either completes Asynchronous.Result and returns it,
+                // or returns a different CompletableFuture instance.
+                CompletableFuture<Object> returnedFuture = (CompletableFuture<Object>) context.proceed();
+                completeResultFuture(method, resultFuture, returnedFuture);
             } catch (Exception ex) {
                 resultFuture.completeExceptionally(ex);
             } finally {
-                // Check if Asynchronous.Result is not completed?
-                if (!returnedFuture.isDone()) {
-                    LOG.log(ERROR,
-                        "Method annotated with @Asynchronous did not call Asynchronous.Result.complete() at its end: {0}",
-                        method);
-                    Asynchronous.Result.getFuture().cancel(true);
-                }
-                if (returnedFuture != Asynchronous.Result.getFuture()) {
-                    // if the asynchronous methods returns a different future, use this to complete the resultFuture
-                    try {
-                        resultFuture.complete(returnedFuture.get());
-                    } catch (InterruptedException | ExecutionException e) {
-                        resultFuture.completeExceptionally(e);
-                    }
-                }
                 // cleanup after asynchronous call
                 Asynchronous.Result.setFuture(null);
             }
         });
         return resultFuture;
+    }
+
+    /**
+     * Bridges the future returned by an {@code @Asynchronous} method to the {@code resultFuture}
+     * handed to the caller.
+     * <p>
+     * Two cases are supported per the Jakarta Concurrency specification:
+     * <ul>
+     * <li>The method completes {@link Asynchronous.Result} and returns it (the same instance as
+     * {@code resultFuture}). In that case the result future is already completed; if it is not, the
+     * method forgot to call {@code Asynchronous.Result.complete()} and the result future is
+     * cancelled.</li>
+     * <li>The method returns a <em>different</em> {@link CompletableFuture}. Its completion (value or
+     * exception) is propagated to {@code resultFuture} without blocking the executor thread.</li>
+     * </ul>
+     *
+     * @param method the intercepted method, used for diagnostics only
+     * @param resultFuture the future returned to the caller (also bound to {@link Asynchronous.Result})
+     * @param returnedFuture the future returned by the method body
+     */
+    static void completeResultFuture(Method method, CompletableFuture<Object> resultFuture,
+            CompletableFuture<Object> returnedFuture) {
+        if (returnedFuture == resultFuture) {
+            // The method was expected to complete Asynchronous.Result itself.
+            if (!returnedFuture.isDone()) {
+                LOG.log(ERROR,
+                    "Method annotated with @Asynchronous did not call Asynchronous.Result.complete() at its end: {0}",
+                    method);
+                resultFuture.cancel(true);
+            }
+        } else {
+            // The method returned a different future; complete resultFuture when it completes.
+            returnedFuture.whenComplete((value, throwable) -> {
+                if (throwable != null) {
+                    resultFuture.completeExceptionally(throwable);
+                } else {
+                    resultFuture.complete(value);
+                }
+            });
+        }
     }
 
     private static <T> T lookupMES(Class<T> cls, String executor, String methodName) throws RejectedExecutionException {
